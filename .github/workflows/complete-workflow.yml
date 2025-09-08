@@ -1,5 +1,8 @@
 name: Build code, run unit test, run SAST, SCA, DAST security scans
 on: push
+permissions:
+  contents: read
+  issues: write
 
 jobs:
   build:
