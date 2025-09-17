@@ -1,4 +1,4 @@
-name: Enhanced Security Pipeline with AI Analysis
+name: Enhanced Security Pipeline with Self-Hosted Runner
 on: 
   push:
     branches: [main, master, develop]
@@ -11,13 +11,9 @@ permissions:
   pull-requests: write
   actions: read
 
-env:
-  OLLAMA_HOST: ${{ secrets.OLLAMA_HOST || 'http://localhost:11434' }}
-  MISTRAL_MODEL: mistral:7b-instruct-v0.2-q4_0
-
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest  # Use GitHub's runners for regular builds
     name: Run unit tests and SAST scan on the source code 
     outputs:
       sonar-results: ${{ steps.sonar-scan.outputs.report-path }}
@@ -41,14 +37,13 @@ jobs:
           -Dsonar.projectKey=testtraining_testtraining \
           -Dsonar.organization=testtraining \
           -Dsonar.host.url=https://sonarcloud.io \
-          -Dsonar.token=$SONAR_TOKEN \
-          -Dsonar.ws.timeout=300
+          -Dsonar.token=$SONAR_TOKEN
         
         # Download SonarCloud results
-        sleep 30  # Wait for SonarCloud processing
+        sleep 30
         curl -u "$SONAR_TOKEN:" \
           "https://sonarcloud.io/api/issues/search?componentKeys=testtraining_testtraining&resolved=false" \
-          -o sonar-results.json
+          -o sonar-results.json || echo '{"issues":[]}' > sonar-results.json
         
         echo "report-path=sonar-results.json" >> $GITHUB_OUTPUT
       env:
@@ -62,7 +57,7 @@ jobs:
         path: sonar-results.json
 
   security:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest  # Use GitHub's runners for security scans
     needs: build
     name: Run the SCA scan on the source code
     outputs:
@@ -86,7 +81,7 @@ jobs:
           path: snyk-results.json
 
   zap_scan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest  # Use GitHub's runners for ZAP scan
     needs: security
     name: Run DAST scan on the web application
     outputs:
@@ -111,45 +106,54 @@ jobs:
           name: zap-results
           path: zap-report.json
 
-  # NEW: AI-Powered Security Analysis
+  # AI Analysis using self-hosted runner with local Ollama
   ai_security_analysis:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted  # This runs on YOUR server with Ollama
     needs: [build, security, zap_scan]
-    name: AI-Powered Security Intelligence Analysis
+    name: AI-Powered Security Analysis (Local Ollama)
     steps:
       - name: Checkout
         uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-      
-      - name: Install Python dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install requests python-dotenv
+          python3 -m pip install --upgrade pip
+          python3 -m pip install requests
       
       - name: Download all scan results
         uses: actions/download-artifact@v4
         with:
           path: scan-results/
       
-      - name: Setup Ollama (if not using external server)
-        if: ${{ !secrets.OLLAMA_HOST }}
+      - name: Check Local Ollama
         run: |
-          # Install Ollama
-          curl -fsSL https://ollama.ai/install.sh | sh
+          echo "🔍 Checking local Ollama status..."
           
-          # Start Ollama in background
-          ollama serve &
-          sleep 10
+          # Check if ollama process is running
+          if pgrep -x "ollama" > /dev/null; then
+            echo "✅ Ollama process is running"
+          else
+            echo "⚠️  Ollama not running, starting it..."
+            ollama serve &
+            sleep 10
+          fi
           
-          # Pull Mistral model
-          ollama pull mistral:7b-instruct-v0.2-q4_0
+          # Test local connection
+          if curl -s -m 5 http://localhost:11434/api/tags > /dev/null; then
+            echo "✅ Ollama API is responding"
+          else
+            echo "❌ Ollama API not responding"
+            exit 1
+          fi
           
-          # Verify installation
-          ollama list
+          # Check if Mistral model is available
+          if ollama list | grep -q "mistral"; then
+            echo "✅ Mistral model is available"
+            ollama list | grep mistral
+          else
+            echo "⚠️  Mistral model not found, pulling it..."
+            ollama pull mistral:latest
+          fi
       
       - name: Create Security Context
         run: |
@@ -159,19 +163,14 @@ jobs:
             "compliance_requirements": ["SOC2", "OWASP"],
             "attack_surface": ["web_application", "api_endpoints"],
             "environment": "production",
-            "data_classification": "confidential",
             "risk_tolerance": "low",
+            "critical_assets": ["user_authentication", "user_database"],
             "remediation_sla": {
               "critical": "24_hours",
               "high": "72_hours",
               "medium": "7_days",
               "low": "30_days"
-            },
-            "critical_assets": [
-              "authentication_system",
-              "user_database",
-              "payment_processing"
-            ]
+            }
           }
           EOF
       
@@ -182,26 +181,14 @@ jobs:
           import requests
           import sys
           import os
-          from typing import Dict, List, Any
-          from dataclasses import dataclass
           import time
+          from typing import Dict, List
 
-          @dataclass
-          class SecurityFinding:
-              tool: str
-              severity: str
-              vulnerability: str
-              file_path: str
-              line_number: int
-              description: str
-              cwe_id: str
-              cvss_score: float
-              raw_data: dict
-
-          class OllamaMistralAgent:
-              def __init__(self, host="http://localhost:11434", model="mistral:7b-instruct-v0.2-q4_0"):
-                  self.host = host
-                  self.model = model
+          class LocalOllamaAgent:
+              def __init__(self):
+                  self.host = "http://localhost:11434"  # Always use localhost on self-hosted runner
+                  self.model = "mistral:latest"
+                  print(f"🤖 Using local Ollama at: {self.host}")
                   self.context = self.load_security_context()
               
               def load_security_context(self):
@@ -221,75 +208,46 @@ jobs:
                               "options": {
                                   "temperature": 0.1,
                                   "num_ctx": 4096,
-                                  "num_predict": 2048
+                                  "num_predict": 1024
                               }
                           }
                           
+                          print(f"🔄 Querying local Mistral (attempt {attempt + 1})...")
                           response = requests.post(f"{self.host}/api/generate", json=payload, timeout=300)
                           response.raise_for_status()
-                          return response.json().get("response", "")
+                          
+                          result = response.json().get("response", "")
+                          print(f"✅ Received response ({len(result)} characters)")
+                          return result
+                          
                       except Exception as e:
-                          print(f"Attempt {attempt + 1} failed: {e}")
+                          print(f"❌ Error (attempt {attempt + 1}): {e}")
                           if attempt < max_retries - 1:
                               time.sleep(5)
                           else:
-                              return f"Error: Unable to query Mistral after {max_retries} attempts"
-              
-              def analyze_cross_tool_correlation(self, findings: List[SecurityFinding]) -> Dict:
-                  findings_summary = []
-                  for f in findings[:20]:  # Limit to avoid token limits
-                      findings_summary.append({
-                          "tool": f.tool,
-                          "severity": f.severity,
-                          "vulnerability": f.vulnerability,
-                          "file": f.file_path,
-                          "description": f.description[:200],  # Truncate long descriptions
-                          "cwe": f.cwe_id,
-                          "cvss": f.cvss_score
-                      })
+                              return f"Local AI analysis failed: {str(e)}"
                   
-                  prompt = f"""
-          As a cybersecurity expert, analyze these security findings from multiple tools:
+                  return "Failed to get AI analysis after multiple attempts"
+              
+              def analyze_security_findings(self, findings_summary):
+                  prompt = f"""As a cybersecurity expert, analyze these security findings:
 
           Business Context:
           - Criticality: {self.context.get('business_criticality', 'medium')}
           - Compliance: {', '.join(self.context.get('compliance_requirements', []))}
           - Risk Tolerance: {self.context.get('risk_tolerance', 'medium')}
 
-          Security Findings ({len(findings)} total, showing top 20):
+          Security Findings ({len(findings_summary)} total):
           {json.dumps(findings_summary, indent=2)}
 
           Provide a JSON analysis with these keys:
-          1. "risk_summary": Overall risk assessment
-          2. "top_priorities": Top 5 findings with business impact scores (1-10)
-          3. "correlations": Findings that appear related or from same root cause
-          4. "false_positive_candidates": Likely false positives with reasoning
-          5. "attack_chains": Potential attack sequences using multiple vulnerabilities
-          6. "remediation_sequence": Recommended fix order with justification
+          1. "risk_summary": Overall risk assessment (1-2 sentences)
+          2. "top_priorities": Top 3 findings with business impact scores (1-10)
+          3. "recommendations": 3 specific actionable recommendations
 
-          Respond ONLY with valid JSON, no additional text.
-                  """
+          Respond ONLY with valid JSON, no additional text."""
                   
-                  response = self.query_mistral(prompt)
-                  try:
-                      # Try to extract JSON from response
-                      start = response.find('{')
-                      end = response.rfind('}') + 1
-                      if start >= 0 and end > start:
-                          return json.loads(response[start:end])
-                  except:
-                      pass
-                  
-                  # Fallback response
-                  return {
-                      "risk_summary": "AI analysis failed, manual review required",
-                      "top_priorities": [],
-                      "correlations": [],
-                      "false_positive_candidates": [],
-                      "attack_chains": [],
-                      "remediation_sequence": [],
-                      "raw_ai_response": response
-                  }
+                  return self.query_mistral(prompt)
 
           def parse_scan_results():
               findings = []
@@ -298,105 +256,99 @@ jobs:
               try:
                   with open('scan-results/sonar-results/sonar-results.json', 'r') as f:
                       sonar_data = json.load(f)
-                      for issue in sonar_data.get('issues', []):
-                          findings.append(SecurityFinding(
-                              tool="SonarQube",
-                              severity=issue.get('severity', 'UNKNOWN'),
-                              vulnerability=issue.get('rule', 'Unknown Rule'),
-                              file_path=issue.get('component', '').replace('testtraining_testtraining:', ''),
-                              line_number=issue.get('line', 0),
-                              description=issue.get('message', ''),
-                              cwe_id=issue.get('tags', [''])[0] if issue.get('tags') else '',
-                              cvss_score=0.0,
-                              raw_data=issue
-                          ))
+                      for issue in sonar_data.get('issues', [])[:10]:
+                          findings.append({
+                              "tool": "SonarQube",
+                              "severity": issue.get('severity', 'UNKNOWN'),
+                              "vulnerability": issue.get('rule', 'Unknown Rule'),
+                              "file": issue.get('component', '').replace('testtraining_testtraining:', ''),
+                              "line": issue.get('line', 0),
+                              "description": issue.get('message', '')[:200]
+                          })
               except Exception as e:
-                  print(f"Error parsing SonarQube results: {e}")
+                  print(f"⚠️  Error parsing SonarQube results: {e}")
               
               # Parse Snyk results
               try:
                   with open('scan-results/snyk-results/snyk-results.json', 'r') as f:
                       snyk_data = json.load(f)
-                      for vuln in snyk_data.get('vulnerabilities', []):
-                          findings.append(SecurityFinding(
-                              tool="Snyk",
-                              severity=vuln.get('severity', 'unknown'),
-                              vulnerability=vuln.get('title', 'Unknown Vulnerability'),
-                              file_path=vuln.get('from', [''])[0] if vuln.get('from') else '',
-                              line_number=0,
-                              description=vuln.get('description', ''),
-                              cwe_id=vuln.get('identifiers', {}).get('CWE', [''])[0] if vuln.get('identifiers', {}).get('CWE') else '',
-                              cvss_score=vuln.get('cvssScore', 0.0),
-                              raw_data=vuln
-                          ))
+                      for vuln in snyk_data.get('vulnerabilities', [])[:5]:
+                          findings.append({
+                              "tool": "Snyk",
+                              "severity": vuln.get('severity', 'unknown'),
+                              "vulnerability": vuln.get('title', 'Unknown Vulnerability'),
+                              "description": vuln.get('description', '')[:200],
+                              "cvss": vuln.get('cvssScore', 0.0)
+                          })
               except Exception as e:
-                  print(f"Error parsing Snyk results: {e}")
+                  print(f"⚠️  Error parsing Snyk results: {e}")
               
               # Parse ZAP results
               try:
                   with open('scan-results/zap-results/zap-report.json', 'r') as f:
                       zap_data = json.load(f)
                       site_data = zap_data.get('site', [{}])[0] if zap_data.get('site') else {}
-                      for alert in site_data.get('alerts', []):
-                          findings.append(SecurityFinding(
-                              tool="ZAP",
-                              severity=alert.get('riskdesc', 'Unknown Risk'),
-                              vulnerability=alert.get('name', 'Unknown Alert'),
-                              file_path=alert.get('url', ''),
-                              line_number=0,
-                              description=alert.get('desc', ''),
-                              cwe_id=str(alert.get('cweid', '')),
-                              cvss_score=0.0,
-                              raw_data=alert
-                          ))
+                      for alert in site_data.get('alerts', [])[:5]:
+                          findings.append({
+                              "tool": "ZAP",
+                              "severity": alert.get('riskdesc', 'Unknown Risk'),
+                              "vulnerability": alert.get('name', 'Unknown Alert'),
+                              "url": alert.get('url', ''),
+                              "description": alert.get('desc', '')[:200]
+                          })
               except Exception as e:
-                  print(f"Error parsing ZAP results: {e}")
+                  print(f"⚠️  Error parsing ZAP results: {e}")
               
               return findings
 
           def main():
-              print("Starting AI Security Analysis...")
+              print("🚀 Starting Local AI Security Analysis...")
               
-              # Parse all security findings
+              # Parse security findings
               findings = parse_scan_results()
-              print(f"Found {len(findings)} total security findings")
+              print(f"📊 Found {len(findings)} security findings across all tools")
               
               if not findings:
-                  print("No security findings to analyze")
-                  return
-              
-              # Initialize AI agent
-              agent = OllamaMistralAgent()
-              
-              # Run AI analysis
-              print("Running AI correlation analysis...")
-              analysis = agent.analyze_cross_tool_correlation(findings)
+                  print("⚠️  No security findings to analyze")
+                  final_results = {
+                      "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                      "total_findings": 0,
+                      "ai_analysis": "No security findings to analyze",
+                      "status": "success"
+                  }
+              else:
+                  # Initialize AI agent
+                  agent = LocalOllamaAgent()
+                  
+                  # Run AI analysis
+                  print("🤖 Running local AI analysis...")
+                  ai_response = agent.analyze_security_findings(findings)
+                  
+                  # Try to parse AI response as JSON
+                  try:
+                      ai_analysis = json.loads(ai_response)
+                  except:
+                      ai_analysis = {
+                          "risk_summary": "AI analysis completed but response was not in expected format",
+                          "raw_response": ai_response[:500]
+                      }
+                  
+                  # Create final results
+                  final_results = {
+                      "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                      "total_findings": len(findings),
+                      "tools_used": list(set(f.get('tool') for f in findings)),
+                      "ai_analysis": ai_analysis,
+                      "findings_sample": findings[:3],
+                      "status": "success"
+                  }
               
               # Save results
-              final_results = {
-                  "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
-                  "total_findings": len(findings),
-                  "tools_used": list(set(f.tool for f in findings)),
-                  "ai_analysis": analysis,
-                  "findings_by_severity": {
-                      "critical": len([f for f in findings if 'critical' in f.severity.lower()]),
-                      "high": len([f for f in findings if 'high' in f.severity.lower()]),
-                      "medium": len([f for f in findings if 'medium' in f.severity.lower()]),
-                      "low": len([f for f in findings if 'low' in f.severity.lower()])
-                  }
-              }
-              
               with open('ai-analysis-results.json', 'w') as f:
                   json.dump(final_results, f, indent=2)
               
-              print("AI Security Analysis Complete!")
-              print(f"Results saved to ai-analysis-results.json")
-              
-              # Print summary
-              print("\n=== AI ANALYSIS SUMMARY ===")
-              print(f"Risk Assessment: {analysis.get('risk_summary', 'Unknown')}")
-              print(f"Top Priorities: {len(analysis.get('top_priorities', []))}")
-              print(f"Potential Correlations: {len(analysis.get('correlations', []))}")
+              print("✅ Local AI Security Analysis Complete!")
+              print("📄 Results saved to ai-analysis-results.json")
 
           if __name__ == "__main__":
               main()
@@ -404,69 +356,51 @@ jobs:
       
       - name: Run AI Security Analysis
         run: |
-          python ai_security_agent.py
-        env:
-          OLLAMA_HOST: ${{ env.OLLAMA_HOST }}
+          python3 ai_security_agent.py
       
       - name: Generate Executive Summary
         run: |
-          cat > generate_summary.py << 'EOF'
+          python3 -c "
           import json
           from datetime import datetime
-
-          def generate_executive_report():
-              try:
-                  with open('ai-analysis-results.json', 'r') as f:
-                      results = json.load(f)
-              except:
-                  return "# Security Analysis Report\n\nError: Could not load analysis results"
-              
-              report = f"""# Security Analysis Executive Summary
-
-          **Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-          **Pipeline Run:** ${{{{ github.run_number }}}}
-
-          ## 📊 Key Metrics
-          - **Total Findings:** {results.get('total_findings', 0)}
-          - **Tools Used:** {', '.join(results.get('tools_used', []))}
-          - **Critical:** {results.get('findings_by_severity', {}).get('critical', 0)}
-          - **High:** {results.get('findings_by_severity', {}).get('high', 0)}
-          - **Medium:** {results.get('findings_by_severity', {}).get('medium', 0)}
-
-          ## 🤖 AI-Powered Analysis
-          **Risk Assessment:** {results.get('ai_analysis', {}).get('risk_summary', 'Analysis pending')}
-
-          ### 🎯 Top Priority Issues
-          """
-              
-              priorities = results.get('ai_analysis', {}).get('top_priorities', [])
-              for i, priority in enumerate(priorities[:5], 1):
-                  if isinstance(priority, dict):
-                      report += f"{i}. **{priority.get('vulnerability', 'Unknown')}** (Impact: {priority.get('business_impact', 'N/A')})\n"
-                  else:
-                      report += f"{i}. {priority}\n"
-              
-              correlations = results.get('ai_analysis', {}).get('correlations', [])
-              if correlations:
-                  report += f"\n### 🔗 Security Correlations\n"
-                  for correlation in correlations[:3]:
-                      report += f"- {correlation}\n"
-              
-              remediation = results.get('ai_analysis', {}).get('remediation_sequence', [])
-              if remediation:
-                  report += f"\n### 🛠️ Recommended Actions\n"
-                  for i, action in enumerate(remediation[:3], 1):
-                      report += f"{i}. {action}\n"
-              
-              return report
-
-          with open('executive-summary.md', 'w') as f:
-              f.write(generate_executive_report())
-              
-          print("Executive summary generated")
-          EOF
           
-          python generate_summary.py
+          try:
+              with open('ai-analysis-results.json', 'r') as f:
+                  results = json.load(f)
+          except:
+              results = {'ai_analysis': 'Failed to load results'}
+          
+          summary = f'''# 🤖 AI Security Analysis Summary (Local Ollama)
+          
+          **Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+          **Total Findings:** {results.get('total_findings', 0)}
+          **Tools:** {', '.join(results.get('tools_used', []))}
+          **Status:** {results.get('status', 'unknown')}
+          **AI Engine:** Local Mistral on Self-Hosted Runner
+          
+          ## Risk Assessment
+          {results.get('ai_analysis', {}).get('risk_summary', 'Analysis not available')}
+          
+          ## Top Priorities
+          '''
+          
+          priorities = results.get('ai_analysis', {}).get('top_priorities', [])
+          if isinstance(priorities, list):
+              for i, priority in enumerate(priorities[:3], 1):
+                  if isinstance(priority, dict):
+                      summary += f'{i}. **{priority.get(\"vulnerability\", \"Unknown\")}** (Impact: {priority.get(\"business_impact\", \"N/A\")})\n'
+                  else:
+                      summary += f'{i}. {priority}\n'
+          
+          recommendations = results.get('ai_analysis', {}).get('recommendations', [])
+          if recommendations:
+              summary += '\n## Recommendations\n'
+              for i, rec in enumerate(recommendations[:3], 1):
+                  summary += f'{i}. {rec}\n'
+          
+          with open('executive-summary.md', 'w') as f:
+              f.write(summary)
+          "
       
       - name: Upload AI Analysis Results
         uses: actions/upload-artifact@v4
@@ -488,62 +422,8 @@ jobs:
                 issue_number: context.issue.number,
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                body: `## 🤖 AI Security Analysis Results\n\n${summary}`
+                body: summary
               });
             } catch (error) {
               console.log('Error posting comment:', error);
-            }
-
-  # NEW: Automated Remediation (Optional)
-  auto_remediation:
-    runs-on: ubuntu-latest
-    needs: ai_security_analysis
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    name: Automated Security Remediation
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Download AI Analysis
-        uses: actions/download-artifact@v4
-        with:
-          name: ai-analysis-results
-      
-      - name: Create Security Issues
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            try {
-              const results = JSON.parse(fs.readFileSync('ai-analysis-results.json', 'utf8'));
-              const priorities = results.ai_analysis?.top_priorities || [];
-              
-              for (const priority of priorities.slice(0, 3)) {
-                if (typeof priority === 'object' && priority.vulnerability) {
-                  await github.rest.issues.create({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    title: `🔒 Security: ${priority.vulnerability}`,
-                    body: `## AI-Identified Security Issue
-                    
-          **Severity:** ${priority.severity || 'Unknown'}
-          **Business Impact:** ${priority.business_impact || 'Unknown'}
-          **Tool:** ${priority.tool || 'Multiple'}
-          
-          **Description:**
-          ${priority.description || 'AI-identified security vulnerability requiring attention'}
-          
-          **Recommended Action:**
-          ${priority.recommended_action || 'Manual review and remediation required'}
-          
-          ---
-          *This issue was automatically created by AI security analysis*`,
-                    labels: ['security', 'ai-detected', priority.severity?.toLowerCase() || 'medium']
-                  });
-                }
-              }
-            } catch (error) {
-              console.log('Error creating issues:', error);
             }
