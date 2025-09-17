@@ -1,9 +1,9 @@
 name: Enhanced Security Pipeline with Self-Hosted Runner
 on: 
   push:
-    branches: [main, master, develop]
+    branches: [master, main, develop]
   pull_request:
-    branches: [main, master]
+    branches: [master, main]
 
 permissions:
   contents: read
@@ -115,10 +115,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       
-      - name: Set up Python
+      - name: Set up Python Dependencies
         run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install requests
+          # Install system packages (preferred for production)
+          sudo apt update
+          sudo apt install -y python3-requests python3-urllib3 python3-json5 || true
+          
+          # Test if requests is available via system packages
+          if python3 -c "import requests; print('System requests available')" 2>/dev/null; then
+            echo "✅ Python requests available via system packages"
+          else
+            echo "📦 Installing requests via pip with override"
+            python3 -m pip install --break-system-packages requests urllib3
+          fi
+          
+          # Verify installation
+          python3 -c "import requests; import json; print('✅ All Python dependencies ready')"
       
       - name: Download all scan results
         uses: actions/download-artifact@v4
@@ -141,6 +153,7 @@ jobs:
           # Test local connection
           if curl -s -m 5 http://localhost:11434/api/tags > /dev/null; then
             echo "✅ Ollama API is responding"
+            curl -s http://localhost:11434/api/tags | head -5
           else
             echo "❌ Ollama API not responding"
             exit 1
@@ -256,6 +269,7 @@ jobs:
               try:
                   with open('scan-results/sonar-results/sonar-results.json', 'r') as f:
                       sonar_data = json.load(f)
+                      print(f"📊 SonarQube: Processing {len(sonar_data.get('issues', []))} issues")
                       for issue in sonar_data.get('issues', [])[:10]:
                           findings.append({
                               "tool": "SonarQube",
@@ -272,7 +286,9 @@ jobs:
               try:
                   with open('scan-results/snyk-results/snyk-results.json', 'r') as f:
                       snyk_data = json.load(f)
-                      for vuln in snyk_data.get('vulnerabilities', [])[:5]:
+                      vulns = snyk_data.get('vulnerabilities', [])
+                      print(f"📦 Snyk: Processing {len(vulns)} vulnerabilities")
+                      for vuln in vulns[:5]:
                           findings.append({
                               "tool": "Snyk",
                               "severity": vuln.get('severity', 'unknown'),
@@ -288,7 +304,9 @@ jobs:
                   with open('scan-results/zap-results/zap-report.json', 'r') as f:
                       zap_data = json.load(f)
                       site_data = zap_data.get('site', [{}])[0] if zap_data.get('site') else {}
-                      for alert in site_data.get('alerts', [])[:5]:
+                      alerts = site_data.get('alerts', [])
+                      print(f"🌐 ZAP: Processing {len(alerts)} alerts")
+                      for alert in alerts[:5]:
                           findings.append({
                               "tool": "ZAP",
                               "severity": alert.get('riskdesc', 'Unknown Risk'),
@@ -306,7 +324,7 @@ jobs:
               
               # Parse security findings
               findings = parse_scan_results()
-              print(f"📊 Found {len(findings)} security findings across all tools")
+              print(f"📋 Found {len(findings)} security findings across all tools")
               
               if not findings:
                   print("⚠️  No security findings to analyze")
@@ -327,7 +345,9 @@ jobs:
                   # Try to parse AI response as JSON
                   try:
                       ai_analysis = json.loads(ai_response)
-                  except:
+                      print("✅ AI response parsed successfully as JSON")
+                  except json.JSONDecodeError:
+                      print("⚠️  AI response was not valid JSON, using raw response")
                       ai_analysis = {
                           "risk_summary": "AI analysis completed but response was not in expected format",
                           "raw_response": ai_response[:500]
@@ -349,6 +369,13 @@ jobs:
               
               print("✅ Local AI Security Analysis Complete!")
               print("📄 Results saved to ai-analysis-results.json")
+              
+              # Print summary
+              print(f"\n📊 Summary:")
+              print(f"- Total findings: {final_results['total_findings']}")
+              if final_results['total_findings'] > 0:
+                  print(f"- Tools: {', '.join(final_results.get('tools_used', []))}")
+              print(f"- Status: {final_results['status']}")
 
           if __name__ == "__main__":
               main()
@@ -356,6 +383,10 @@ jobs:
       
       - name: Run AI Security Analysis
         run: |
+          echo "🚀 Running AI Security Analysis on self-hosted runner..."
+          echo "Server: $(hostname)"
+          echo "User: $(whoami)"
+          echo "Working directory: $(pwd)"
           python3 ai_security_agent.py
       
       - name: Generate Executive Summary
@@ -367,8 +398,9 @@ jobs:
           try:
               with open('ai-analysis-results.json', 'r') as f:
                   results = json.load(f)
-          except:
-              results = {'ai_analysis': 'Failed to load results'}
+          except Exception as e:
+              print(f'Error loading results: {e}')
+              results = {'ai_analysis': 'Failed to load results', 'total_findings': 0, 'status': 'error'}
           
           summary = f'''# 🤖 AI Security Analysis Summary (Local Ollama)
           
@@ -385,12 +417,14 @@ jobs:
           '''
           
           priorities = results.get('ai_analysis', {}).get('top_priorities', [])
-          if isinstance(priorities, list):
+          if isinstance(priorities, list) and priorities:
               for i, priority in enumerate(priorities[:3], 1):
                   if isinstance(priority, dict):
                       summary += f'{i}. **{priority.get(\"vulnerability\", \"Unknown\")}** (Impact: {priority.get(\"business_impact\", \"N/A\")})\n'
                   else:
                       summary += f'{i}. {priority}\n'
+          else:
+              summary += 'No specific priorities identified\n'
           
           recommendations = results.get('ai_analysis', {}).get('recommendations', [])
           if recommendations:
@@ -398,8 +432,21 @@ jobs:
               for i, rec in enumerate(recommendations[:3], 1):
                   summary += f'{i}. {rec}\n'
           
+          summary += f'''
+          
+          ## Technical Details
+          - Analysis Engine: Mistral AI (Local)
+          - Runner: Self-hosted on {results.get('runner_info', 'production server')}
+          - Processing Time: {results.get('processing_time', 'N/A')}
+          
+          ---
+          *This analysis was generated automatically by AI-enhanced DevSecOps pipeline*
+          '''
+          
           with open('executive-summary.md', 'w') as f:
               f.write(summary)
+              
+          print('✅ Executive summary generated')
           "
       
       - name: Upload AI Analysis Results
@@ -410,6 +457,26 @@ jobs:
             ai-analysis-results.json
             executive-summary.md
       
+      - name: Display Results Summary
+        run: |
+          echo "📋 AI Security Analysis Complete!"
+          echo "================================"
+          if [ -f ai-analysis-results.json ]; then
+            python3 -c "
+          import json
+          with open('ai-analysis-results.json', 'r') as f:
+              data = json.load(f)
+          print(f'✅ Status: {data.get(\"status\", \"unknown\")}')
+          print(f'📊 Total Findings: {data.get(\"total_findings\", 0)}')
+          print(f'🛠️  Tools Used: {data.get(\"tools_used\", [])}')
+          print(f'⏱️  Timestamp: {data.get(\"timestamp\", \"unknown\")}')
+          if data.get('ai_analysis', {}).get('risk_summary'):
+              print(f'🎯 Risk Summary: {data.get(\"ai_analysis\", {}).get(\"risk_summary\", \"N/A\")[:100]}...')
+            "
+          else
+            echo "❌ Results file not found"
+          fi
+      
       - name: Comment on PR with AI Analysis
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
@@ -417,13 +484,18 @@ jobs:
           script: |
             const fs = require('fs');
             try {
-              const summary = fs.readFileSync('executive-summary.md', 'utf8');
-              await github.rest.issues.createComment({
-                issue_number: context.issue.number,
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                body: summary
-              });
+              if (fs.existsSync('executive-summary.md')) {
+                const summary = fs.readFileSync('executive-summary.md', 'utf8');
+                await github.rest.issues.createComment({
+                  issue_number: context.issue.number,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  body: summary
+                });
+                console.log('✅ AI analysis posted to PR');
+              } else {
+                console.log('⚠️  Executive summary not found');
+              }
             } catch (error) {
-              console.log('Error posting comment:', error);
+              console.log('⚠️  Could not post PR comment:', error.message);
             }
